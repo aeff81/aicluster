@@ -310,8 +310,6 @@ curl -s http://192.168.41.57:8080/v1/images/generations \
 
 Der Bild-Server bietet zusätzlich eine zu Automatic1111 kompatible API unter `/sdapi/v1/...` sowie eine eigene API unter `/sdcpp/v1/...`.
 
-> **Ausführliche Beispiele** zu Sampler, CFG, Steps, Batch, Hires-Fix, LoRA, Modellwechsel und nativer API stehen in [`examples.md`](examples.md).
-
 **Web-Oberfläche:** Im Browser `http://192.168.41.57:8080/` öffnen. Die Oberfläche ist fest in `sd-server` eingebettet und benötigt keinen zusätzlichen Webserver. Sie kann Bilder erzeugen und den Fortschritt anzeigen. Damit sie zusätzlich die Modelldateien aus dem eingebundenen Verzeichnis zur Auswahl anbietet, im `docker run`-Befehl ergänzen:
 
 ```bash
@@ -423,19 +421,7 @@ docker rm -f sd-rpc
 
 **Update:** Neues Image bauen/verteilen, dann **alle** Container neu erstellen. Niemals nur einzelne Knoten aktualisieren, da das RPC-Protokoll an die Build-Version gebunden ist.
 
-### 2.11 Alternative: docker compose (nur Einzelhost)
-
-Für einen Testaufbau auf **einem** Rechner liegt eine `docker-compose.yml` bei:
-
-```bash
-docker compose up --build -d
-docker compose logs -f
-docker compose down
-```
-
-Die Datei definiert drei Dienste (`master`, `llama-server`, `rpc-worker`). Der Master erreicht den Worker über den Compose-internen DNS-Namen `rpc-worker`. Für den Betrieb über mehrere Hosts ist Compose **nicht** geeignet – dort die `docker run`-Befehle aus den Abschnitten 2.4–2.7 verwenden.
-
-### 2.12 GPU-Beschleunigung mit Vulkan
+### 2.11 GPU-Beschleunigung mit Vulkan
 
 Das Image wird standardmäßig mit Vulkan-Backend gebaut. Eine GPU wird nur genutzt, wenn der Host sie in den Container sichtbar macht; sonst rechnet die Software auf der CPU weiter (Fallback).
 
@@ -485,7 +471,7 @@ Drei Build-Argumente steuern den Umfang:
 |---|---|---|
 | `WITH_VULKAN` | `ON` | reicht `-DSD_VULKAN` bzw. `-DGGML_VULKAN` an CMake weiter; `OFF` ergibt ein reines CPU-Image |
 | `INSTALL_MESA_VULKAN` | `false` | installiert im Laufzeit-Image die Mesa-Treiber (AMD/Intel und Software-Vulkan) |
-| `LLAMA_SERVER_REF` | `9f0d80cf…` | llama.cpp-Commit für `llama-server`; leer = Pin aus `sync-llama.last` (siehe 3.1, „Build von `llama.cpp`") |
+| `LLAMA_SERVER_REF` | `9f0d80cf…` | llama.cpp-Commit für `llama-server`; leer = im Dockerfile hinterlegter Standard-Pin (siehe 3.1) |
 
 **Build von `stable-diffusion.cpp`:**
 
@@ -506,7 +492,7 @@ RUN mkdir build && cd build && \
 
 `llama.cpp` wird **zweimal** aus unterschiedlichen Quellständen gebaut:
 
-1. **`rpc-server`** – exakt auf dem Commit aus `ggml/scripts/sync-llama.last`. Das ist entscheidend, weil `sd-server` und `rpc-server` dasselbe GGML-RPC-Protokoll sprechen müssen:
+1. **`rpc-server`** – exakt auf dem llama.cpp-Commit, den `stable-diffusion.cpp` in seinem Submodul festschreibt. Das ist entscheidend, weil `sd-server` und `rpc-server` dasselbe GGML-RPC-Protokoll sprechen müssen:
 
 ```dockerfile
 RUN HASH=$(cat scripts/sync-llama.last) && \
@@ -522,7 +508,7 @@ RUN REF=${LLAMA_SERVER_REF:-$(cat /sdcpp/ggml/scripts/sync-llama.last)} && \
     git clone https://github.com/ggml-org/llama.cpp.git /llama-server-src && ...
 ```
 
-**Warum der separate Build?** `llama.cpp` hat keine Build-Option, mit der sich einzelne Modell-Architekturen zu- oder abschalten lassen – alle unterstützten Architekturen sind fest im Quellcode. Ein GGUF lädt daher nur, wenn der verwendete Commit die Architektur bereits kennt. Der Pin aus `sync-llama.last` (`47f5a64`, 15.10.2026) ist älter als einige neuere Architekturen, z. B. **LFM3** (in `llama.cpp` seit 27.10.2026, Commit `19cce691`, PR #31252). Ohne den neueren Build scheitert das Laden mit `unknown model architecture: 'lfm3'`.
+**Warum der separate Build?** `llama.cpp` hat keine Build-Option, mit der sich einzelne Modell-Architekturen zu- oder abschalten lassen – alle unterstützten Architekturen sind fest im Quellcode. Ein GGUF lädt daher nur, wenn der verwendete Commit die Architektur bereits kennt. Der von `stable-diffusion.cpp` vorgegebene Pin (`47f5a64`, 15.10.2026) ist älter als einige neuere Architekturen, z. B. **LFM3** (in `llama.cpp` seit 27.10.2026, Commit `19cce691`, PR #31252). Ohne den neueren Build scheitert das Laden mit `unknown model architecture: 'lfm3'`.
 
 Der Standardwert `9f0d80cf` (09.11.2026) ist der letzte `master`-Stand mit **RPC-Protokoll 8**. Damit funktioniert `llama-server --rpc …` weiterhin mit dem oben gepinnten `rpc-server` (Protokoll 8.0.0). Spätere `master`-Stände sprechen Protokoll 9 und können den Cluster-Worker nicht mehr nutzen. Beim Aktualisieren von `LLAMA_SERVER_REF` also immer `ggml/include/ggml-rpc.h` (`RPC_PROTO_MAJOR_VERSION`) prüfen. Ein leerer Wert baut wieder exakt den Pin.
 
@@ -586,18 +572,7 @@ Details:
 
 * **RPC-Auswahl** ebenfalls unterschiedlich: `sd-server` nutzt `--rpc-servers` + `--backend`, `llama-server` nutzt `--rpc` + `--device`.
 
-### 3.3 `docker-compose.yml`
-
-Die Datei ist als Komfort für einen Einzelhost-Test gedacht:
-
-* **`build: .`** und **`image: sd-cluster`** sorgen dafür, dass einmal gebaut und dasselbe Image von allen drei Diensten verwendet wird.
-* **`environment`** setzt `SD_ROLE` und die rollenspezifischen Parameter.
-* **`volumes: ./models:/models`** bindet die Modelldateien ein.
-* **`ports`** veröffentlicht 8080 (Bild) und 8081 (Text); der RPC-Port 50052 bleibt intern, weil der Zugriff über den Servicenamen `rpc-worker` erfolgt.
-* **`depends_on: rpc-worker`** stellt nur die **Startreihenfolge** sicher. Es garantiert **nicht**, dass der RPC-Server bereits Verbindungen annimmt. Bei sehr langsamen Hosts kann der Master daher einmalig abbrechen; `--restart unless-stopped` fängt das ab.
-* **`--backend RPC0`** im Master legt den Worker **fest**. Ohne diese Angabe greift die automatische Platzierung (`--auto-fit`), die den Worker mit dem größten freien Speicher wählt (siehe Abschnitt 2.6).
-
-### 3.4 Bewusste Design-Entscheidungen und Grenzen
+### 3.3 Bewusste Design-Entscheidungen und Grenzen
 
 | Thema | Entscheidung / Grund |
 |---|---|
@@ -605,18 +580,15 @@ Die Datei ist als Komfort für einen Einzelhost-Test gedacht:
 | **Vulkan standardmäßig an** | `WITH_VULKAN=ON` ist der Standard. Der Builder installiert dafür `libvulkan-dev`, `glslc`, `glslang-tools` und `spirv-headers`; das Laufzeit-Image enthält nur den Loader `libvulkan1`. `--build-arg WITH_VULKAN=OFF` erzeugt ein reines CPU-Image. |
 | **Mesa-Treiber optional** | `INSTALL_MESA_VULKAN=false` ist Standard, weil `mesa-vulkan-drivers` über `libllvm19` rund 125 MB plus weitere Treiberbibliotheken nachzieht (zusammen etwa 250 MB). AMD/Intel-Hosts bauen mit `true`; NVIDIA nutzt das `nvidia-container-toolkit`. Software-Vulkan (lavapipe) wird bewusst nicht voreingestellt, weil er als „GPU" mit viel Speicher erkannt wird und die automatische Platzierung verfälschen kann. |
 | **Web-UI eingebettet** | Der Builder installiert `nodejs`/`npm` und `pnpm@10.15.1`. CMake baut das Frontend und bettet `gen_index_html.h` fest in `sd-server` ein (`HAVE_INDEX_HTML`). Zur Laufzeit sind weder Node.js noch ein separater Webserver nötig. Fehlt `pnpm` (z. B. bei deaktiviertem Frontend-Build), wird die UI ohne Fehler weggelassen. |
-| **Protokoll-Pinning** | `rpc-server` wird exakt auf den in `sync-llama.last` hinterlegten Commit gebaut; `llama-server` aus einem neueren Commit (`LLAMA_SERVER_REF`), der dieselbe RPC-Hauptversion hat. Alle Cluster-Knoten müssen dasselbe Image verwenden. |
+| **Protokoll-Pinning** | `rpc-server` wird exakt auf den von `stable-diffusion.cpp` vorgegebenen llama.cpp-Commit gebaut; `llama-server` aus einem neueren Commit (`LLAMA_SERVER_REF`), der dieselbe RPC-Hauptversion hat. Alle Cluster-Knoten müssen dasselbe Image verwenden. |
 | **Statische GGML-Binaries** | `llama.cpp`/`ggml` werden mit `-DBUILD_SHARED_LIBS=OFF` gebaut. `rpc-server` und `llama-server` enthalten `ggml` damit fest und benötigen keine `libggml*.so` im Laufzeit-Image. Der Build prüft das per `ldd`; so kann der Fehler `libggml.so.0: cannot open shared object file` nicht unbemerkt zurückkehren. |
 | **Modelle nur auf dem Master** | Laut `stable-diffusion.cpp`-Dokumentation bleiben die Modelldateien beim Client; der RPC-Server erhält Tensordaten und Rechengraphen. Das Volume auf den Workern ist daher nur einheitlicher Komfort. |
 | **Keine RPC-Sicherheit** | Der `rpc-server` bietet weder Authentifizierung noch Verschlüsselung. Nur in vertrauenswürdigen Netzen betreiben; Port 50052 nicht nach außen freigeben. |
 
-### 3.5 Dateien im Überblick
+### 3.4 Dateien im Überblick
 
 | Datei | Zweck |
 |---|---|
 | `Dockerfile` | zweistufiger Build aller drei Programme inklusive Vulkan-Backend und eingebetteter Web-UI, Laufzeit-Image |
 | `entrypoint.sh` | Rollenwahl über `SD_ROLE`, Start des passenden Servers |
-| `docker-compose.yml` | Beispiel-Deployment auf einem Einzelhost |
-| `samplers.md` | alle Sampler mit Performance-Index und Qualitäts-Ranking |
-| `scalers.md` | alle Hires-Scaler mit Performance-Index, Qualitäts-Ranking und Installationsanleitung |
-| `examples.md` | API-Beispiele: OpenAI-, A1111- und native Endpunkte, Sampler, CFG, Hires, LoRA |
+| `README.md` | diese Dokumentation |
