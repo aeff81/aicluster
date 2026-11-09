@@ -7,6 +7,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Standard ist ON, damit GPU-Beschleunigung ohne CPU-Zwang verfügbar ist.
 ARG WITH_VULKAN=ON
 
+# Quellstand fuer llama-server (LLM-Rolle). Der Pin aus sync-llama.last ist
+# fuer viele neuere Architekturen zu alt (z. B. LFM3, aufgenommen am
+# 27.10.2026). Leer lassen, um wieder exakt den Pin zu verwenden.
+# Siehe ausfuehrliche Begruendung beim llama-server-Build weiter unten.
+ARG LLAMA_SERVER_REF=9f0d80cf4aa781878742d1002fac114c18b76974
+
 # Build-Werkzeuge, Vulkan-Toolchain (glslc + SPIRV-Headers) sowie
 # Node.js/pnpm fuer die Web-UI des sd-servers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -43,25 +49,56 @@ RUN mkdir build && cd build && \
     echo "SD-Binary: $SD_BIN" && test -n "$SD_BIN" && \
     cp "$SD_BIN" /sd-server-binary
 
-# RPC/LLama Server bauen
-WORKDIR /sdcpp/ggml
-# Die Hash-Version fuer Kompatibilitaet verwenden.
+# ---------------------------------------------------------------------------
+# RPC-Worker (rpc-server) fuer stable-diffusion.cpp
+# ---------------------------------------------------------------------------
+# Die Version wird nicht geraten, sondern aus der Submodul-Datei gelesen.
+# rpc-server und sd-server muessen dasselbe GGML-RPC-Protokoll sprechen,
+# deshalb bleibt dieser Build exakt am Pin von stable-diffusion.cpp.
 # Wichtig: Ein Schalter GGML_BUILD_SHARED_LIBS existiert in llama.cpp/ggml
 # nicht. Die Bibliotheken werden ueber das Standard-CMake-Schalter
 # BUILD_SHARED_LIBS gesteuert (Default: ON). Mit OFF entstehen statisch
 # gelinkte Binaries, die keine libggml*.so im Laufzeit-Image benoetigen.
+WORKDIR /sdcpp/ggml
 RUN HASH=$(cat scripts/sync-llama.last) && \
-    git clone https://github.com/ggml-org/llama.cpp.git && \
-    cd llama.cpp && git checkout $HASH && \
+    git clone https://github.com/ggml-org/llama.cpp.git llama-rpc && \
+    cd llama-rpc && git checkout $HASH && \
     mkdir build && cd build && \
     cmake .. -DGGML_RPC=ON -DGGML_VULKAN=${WITH_VULKAN} -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF \
              -DCMAKE_C_FLAGS=-DGGML_MAX_NAME=160 -DCMAKE_CXX_FLAGS=-DGGML_MAX_NAME=160 && \
     cmake --build . --config Release -j $(nproc) && \
     RPC_BIN=$(find . -type f \( -name "ggml-rpc-server" -o -name "rpc-server" \) -executable | head -n1) && \
+    echo "RPC-Binary: $RPC_BIN" && test -n "$RPC_BIN" && \
+    cp "$RPC_BIN" /rpc-server-binary
+
+# ---------------------------------------------------------------------------
+# LLM-Server (llama-server) inklusive aller aktuellen Modell-Architekturen
+# ---------------------------------------------------------------------------
+# llama.cpp kennt keine Build-Option "Architektur X aktivieren": Alle
+# unterstuetzten Architekturen sind fest im Quellcode enthalten. Ein Modell
+# laedt nur, wenn der verwendete Commit die Architektur bereits kennt.
+# Der Pin aus sync-llama.last (47f5a64, 15.10.2026) ist aelter als LFM3
+# (in llama.cpp seit 27.10.2026, Commit 19cce691), daher der separate Build.
+#
+# Der Commit unten ist der letzte master-Stand mit RPC-Protokoll 8
+# (9f0d80cf, 09.11.2026). Damit funktioniert --rpc weiterhin mit dem oben
+# gepinnten rpc-server (Protokoll 8.0.0). Spaetere master-Staende sprechen
+# Protokoll 9 und koennen den Cluster-Worker nicht mehr nutzen.
+#
+# Aktualisieren: ARG LLAMA_SERVER_REF auf einen neueren Commit setzen, der
+#   a) die gewuenschten Architekturen enthaelt und
+#   b) dieselbe RPC-Hauptversion hat (ggml/include/ggml-rpc.h,
+#      RPC_PROTO_MAJOR_VERSION).
+# Ein leerer Wert baut wieder exakt den Pin aus sync-llama.last.
+RUN REF=${LLAMA_SERVER_REF:-$(cat /sdcpp/ggml/scripts/sync-llama.last)} && \
+    git clone https://github.com/ggml-org/llama.cpp.git /llama-server-src && \
+    cd /llama-server-src && git checkout $REF && \
+    mkdir build && cd build && \
+    cmake .. -DGGML_RPC=ON -DGGML_VULKAN=${WITH_VULKAN} -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF \
+             -DCMAKE_C_FLAGS=-DGGML_MAX_NAME=160 -DCMAKE_CXX_FLAGS=-DGGML_MAX_NAME=160 && \
+    cmake --build . --config Release -j $(nproc) && \
     LLAMA_BIN=$(find . -type f -name "llama-server" -executable | head -n1) && \
-    echo "RPC-Binary: $RPC_BIN" && echo "LLama-Binary: $LLAMA_BIN" && \
-    test -n "$RPC_BIN" && test -n "$LLAMA_BIN" && \
-    cp "$RPC_BIN" /rpc-server-binary && \
+    echo "LLama-Binary: $LLAMA_BIN (Ref: $REF)" && test -n "$LLAMA_BIN" && \
     cp "$LLAMA_BIN" /llama-server-binary
 
 # Sicherstellen, dass Binaries existieren und keine ggml-Shared-Library

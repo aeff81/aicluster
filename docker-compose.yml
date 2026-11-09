@@ -1,0 +1,46 @@
+services:
+  master:
+    image: sd-cluster
+    build: .
+    environment:
+      SD_ROLE: MASTER
+      SD_MODEL_PATH: /models/sd_model.gguf
+      # --backend RPC0 legt den Worker fest; ohne diese Angabe wählt die
+      # automatische Platzierung (--auto-fit) den Worker mit dem größten freien Speicher.
+      SD_ARGS: "--rpc-servers rpc-worker:50052 --backend RPC0"
+    volumes:
+      - ./models:/models
+    ports:
+      - "8080:8080"
+    # Optional: lokale GPU nutzen (siehe README 2.12)
+    #   NVIDIA:    gpus: all
+    #   AMD/Intel: devices: ["/dev/dri"]
+    depends_on:
+      - rpc-worker
+
+  llama-server:
+    image: sd-cluster
+    build: .
+    environment:
+      SD_ROLE: LLAMA
+      SD_MODEL_PATH: /models/llama_model.gguf
+      # Für RPC-Offloading: --rpc rpc-worker:50052 --device RPC0 -ngl 99
+      SD_ARGS: "--n-predict 128"
+    volumes:
+      - ./models:/models
+    ports:
+      - "8081:8081"
+    depends_on:
+      - rpc-worker
+
+  rpc-worker:
+    image: sd-cluster
+    build: .
+    environment:
+      SD_ROLE: RPC
+    volumes:
+      - ./models:/models
+    # GPU optional durchreichen:
+    #   NVIDIA:      gpus: all
+    #   AMD/Intel:   devices: ["/dev/dri"]
+    #                (Image mit --build-arg INSTALL_MESA_VULKAN=true bauen)
