@@ -1,6 +1,6 @@
 # Stable-Diffusion-Cluster (CPU/GPU, Docker)
 
-Ein einheitliches Docker-Image, das je nach Umgebungsvariable als **Bildgenerator**, als **Textmodell-Server** oder als **Rechenknecht (RPC-Worker)** startet. Damit lässt sich ein kleiner KI-Cluster auf ganz normaler Hardware betreiben – ohne CUDA und ohne zwingende NVIDIA-GPU. Vorhandene Grafikkarten (AMD, Intel, NVIDIA) werden über Vulkan genutzt, ansonsten rechnet alles auf der CPU.
+Ein einheitliches Docker-Image, das je nach Umgebungsvariable als **Bild- und Videogenerator**, als **Textmodell-Server** oder als **Rechenknecht (RPC-Worker)** startet. Damit lässt sich ein kleiner KI-Cluster auf ganz normaler Hardware betreiben – ohne CUDA und ohne zwingende NVIDIA-GPU. Vorhandene Grafikkarten (AMD, Intel, NVIDIA) werden über Vulkan genutzt, ansonsten rechnet alles auf der CPU.
 
 ---
 
@@ -16,7 +16,7 @@ Das Projekt baut aus mehreren normalen Computern (Servern) einen gemeinsamen KI-
 Eine freie Software, die große Sprachmodelle („Large Language Models", LLM) auf gewöhnlicher Hardware laufen lässt. Bekannt ist sie vor allem durch Programme wie ChatGPT-Alternativen, die lokal auf dem eigenen Rechner antworten. `llama.cpp` ist in C++ geschrieben und auf Geschwindigkeit optimiert.
 
 **stable-diffusion.cpp**
-Das gleiche Prinzip, nur für Bilder: Aus einer Textbeschreibung („ein Hund auf einer Wiese, Ölgemälde") erzeugt die Software ein Bild. `stable-diffusion.cpp` ist die C++-Variante der bekannten Stable-Diffusion-Software und benötigt – wie `llama.cpp` – keine spezielle Grafikkarte.
+Das gleiche Prinzip, nur für Bilder und Videos: Aus einer Textbeschreibung („ein Hund auf einer Wiese, Ölgemälde") erzeugt die Software ein Bild oder eine Bildfolge. `stable-diffusion.cpp` ist die C++-Variante der bekannten Stable-Diffusion-Software und benötigt – wie `llama.cpp` – keine spezielle Grafikkarte.
 
 **GGML-RPC (das „Nervensystem")**
 Beide Programme beruhen auf derselben Rechen-Bibliothek (GGML). Diese bringt eine Funktion mit, mit der ein Rechner Teile seiner Arbeit an andere Rechner im Netzwerk weitergeben kann: RPC (Remote Procedure Call, „entfernter Funktionsaufruf"). Der Master schickt also Rechenaufträge an die Worker und bekommt die Ergebnisse zurück.
@@ -25,7 +25,7 @@ Beide Programme beruhen auf derselben Rechen-Bibliothek (GGML). Diese bringt ein
 
 | Modus | Was der Container tut | Vergleich |
 |---|---|---|
-| **MASTER** | Nimmt Bildwünsche über eine HTTP-Schnittstelle (REST-API) entgegen und erzeugt daraus Bilder. | Der Koch, der Bestellungen annimmt. |
+| **MASTER** | Nimmt Bild- und Videowünsche über eine HTTP-Schnittstelle (REST-API) entgegen und erzeugt daraus Bilder bzw. Videos. | Der Koch, der Bestellungen annimmt. |
 | **LLAMA** | Stellt ein Sprachmodell über eine HTTP-Schnittstelle bereit (Fragen beantworten, Texte schreiben). | Ein zweiter Koch für eine andere Speisekarte. |
 | **RPC** | Führt Rechenaufträge aus, die ihm ein Master schickt. Hat selbst keine eigene API für Endnutzer. | Die Küchenhilfen, die zuarbeiten. |
 
@@ -123,7 +123,7 @@ gunzip -c sd-cluster.tar.gz | docker load
 
 ### 2.3 Modelle ablegen
 
-Auf dem Master-Host (Beispiel: `192.168.41.57`) ein Verzeichnis anlegen:
+Auf dem Master-Host (Beispiel: `cluster`) ein Verzeichnis anlegen:
 
 ```
 /srv/models/
@@ -302,7 +302,7 @@ docker run -d \
 **Funktionstest** (auf dem Master oder von einem Client im Netz):
 
 ```bash
-curl -s http://192.168.41.57:8080/v1/images/generations \
+curl -s http://cluster:8080/v1/images/generations \
   -H "Content-Type: application/json" \
   -d '{"prompt":"a cat sitting on a windowsill, watercolor","size":"512x512","n":1}' \
   | jq -r '.data[0].b64_json' | base64 -d > katze.png
@@ -310,7 +310,7 @@ curl -s http://192.168.41.57:8080/v1/images/generations \
 
 Der Bild-Server bietet zusätzlich eine zu Automatic1111 kompatible API unter `/sdapi/v1/...` sowie eine eigene API unter `/sdcpp/v1/...`.
 
-**Web-Oberfläche:** Im Browser `http://192.168.41.57:8080/` öffnen. Die Oberfläche ist fest in `sd-server` eingebettet und benötigt keinen zusätzlichen Webserver. Sie kann Bilder erzeugen und den Fortschritt anzeigen. Damit sie zusätzlich die Modelldateien aus dem eingebundenen Verzeichnis zur Auswahl anbietet, im `docker run`-Befehl ergänzen:
+**Web-Oberfläche:** Im Browser `http://cluster:8080/` öffnen. Die Oberfläche ist fest in `sd-server` eingebettet und benötigt keinen zusätzlichen Webserver. Sie kann Bilder und Videos erzeugen und den Fortschritt anzeigen. Damit sie zusätzlich die Modelldateien aus dem eingebundenen Verzeichnis zur Auswahl anbietet, im `docker run`-Befehl ergänzen:
 
 ```bash
 -e SD_ARGS="--model-dir /models --rpc-servers 192.168.41.20:50052,192.168.41.42:50052,192.168.40.10:50052 --backend RPC0"
@@ -328,7 +328,102 @@ Der Bild-Server bietet zusätzlich eine zu Automatic1111 kompatible API unter `/
 
 > **Hinweis:** Die Automatik (`--auto-fit`) bevorzugt Geräte mit viel gemeldetem Speicher. Ein CPU-Worker mit 64 GB RAM kann dadurch vor einer GPU mit 8 GB VRAM gewählt werden. Bei gemischter Hardware die Zuweisung deshalb explizit setzen.
 
-### 2.7 Schritt 4: Sprach-Server starten (optional)
+### 2.7 Videogenerierung
+
+Der Master kann neben Bildern auch Videos erzeugen. Die Video-Funktion ist im eingebauten `sd-server` enthalten. Der Schalter `-M vid_gen` gehört dagegen zum separaten Kommandozeilenprogramm von `stable-diffusion.cpp`, das dieses Image nicht enthält; der Server lehnt ihn als unbekanntes Argument ab. `SD_ARGS` daher **ohne** `-M vid_gen` verwenden.
+
+Für ein Videomodell werden die einzelnen Komponenten beim Start übergeben. Damit nicht zusätzlich das Bild-Standardmodell geladen wird, `SD_MODEL_PATH` ausdrücklich leer setzen:
+
+```bash
+docker run -d \
+  --name sd-master \
+  --restart unless-stopped \
+  -e SD_ROLE=MASTER \
+  -e SD_MODEL_PATH="" \
+  -e SD_ARGS="--model-dir /models --diffusion-model /models/diffusion_models/video-modell.safetensors --llm /models/text_encoders/text-encoder.gguf --vae /models/vae/video-vae.safetensors --offload-to-cpu" \
+  -v /srv/models:/models \
+  -p 8080:8080 \
+  sd-cluster
+```
+
+Die Komponenten können auch in der Web-Oberfläche ausgewählt und geladen werden.
+
+**Job anlegen:**
+
+```bash
+curl -s http://cluster:8080/sdcpp/v1/vid_gen \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "a cat walking through a rainy alley",
+    "video_frames": 33,
+    "fps": 16,
+    "width": 832,
+    "height": 480,
+    "sample_params": {
+      "sample_method": "euler",
+      "sample_steps": 20,
+      "guidance": { "txt_cfg": 3.0 }
+    }
+  }'
+```
+
+Die Antwort bestätigt nur die Annahme des Auftrags:
+
+```json
+{"created":1795025559482,"id":"job_1a1efdc5fba_00000000","kind":"vid_gen","poll_url":"/sdcpp/v1/jobs/job_1a1efdc5fba_00000000","status":"queued"}
+```
+
+Die Framezahl wird an das jeweilige Modell angepasst; bei LingBot-, Wan- und Hunyuan-Modellen ist sie ein Vielfaches von vier plus eins. Der Wert `33` ist daher sinnvoll. Bei Modellen mit strukturierter Textbeschreibung muss `prompt` die passende JSON-Zeichenkette enthalten.
+
+**Ergebnis abrufen und speichern:** Das Video wird nicht automatisch als Datei im Container abgelegt. Nach Abschluss liegt es als Base64 im Job-Ergebnis. Das folgende Skript erwartet die Job-ID als ersten Parameter und benötigt `jq` sowie `base64`:
+
+```bash
+#!/bin/bash
+JOB=$1
+BASE=http://cluster:8080
+
+if [ -z "$JOB" ]; then
+  echo "Aufruf: $0 <job-id>"
+  exit 1
+fi
+
+while :; do
+  antwort=$(curl -sSf "$BASE/sdcpp/v1/jobs/$JOB") || {
+    echo "Job nicht mehr abrufbar (vermutlich abgelaufen)."
+    exit 1
+  }
+
+  status=$(jq -r '.status // "unbekannt"' <<< "$antwort")
+  echo "Status: $status"
+
+  case "$status" in
+    completed)
+      break
+      ;;
+    failed)
+      echo "Fehler:"
+      jq -r '.error // .' <<< "$antwort" >&2
+      exit 1
+      ;;
+  esac
+
+  sleep 2
+done
+
+format=$(jq -r '.result.output_format // "webm"' <<< "$antwort")
+jq -r '.result.b64_json' <<< "$antwort" | base64 -d > "output.$format"
+echo "Video gespeichert: output.$format"
+```
+
+Aufruf:
+
+```bash
+./video-abruf.sh job_1a1efdc5fba_00000000
+```
+
+Das Ausgabeformat ist standardmäßig `webm`; `webp` und `avi` werden ebenfalls unterstützt. Abgeschlossene Jobs werden nur für die konfigurierte Zeit vorgehalten (Standard 600 Sekunden). Danach ist das Ergebnis nicht mehr abrufbar.
+
+### 2.8 Schritt 4: Sprach-Server starten (optional)
 
 ```bash
 docker run -d \
@@ -363,13 +458,13 @@ Anders als beim Bild-Master gibt es hier keine Aufteilung nach Modellbestandteil
 **Funktionstest:**
 
 ```bash
-curl -s http://192.168.41.57:8081/v1/chat/completions \
+curl -s http://cluster:8081/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Sag Hallo in einem Satz."}]}' \
   | jq -r '.choices[0].message.content'
 ```
 
-### 2.8 Umgebungsvariablen
+### 2.9 Umgebungsvariablen
 
 | Variable | Bedeutung | Standard |
 |---|---|---|
@@ -393,15 +488,15 @@ docker run -d --name sd-master --restart unless-stopped \
 
 Der Server startet dann ohne `--model`; im Browser wird das Modell aus `/models` ausgewählt. Wichtig: Der Unterschied ist `SD_MODEL_PATH=""` (leer, kein Modell) gegenüber gar nicht gesetzt (Standard `/models/model.gguf`).
 
-### 2.9 Ports
+### 2.10 Ports
 
 | Port | Rolle | Zweck |
 |---|---|---|
-| `8080/tcp` | MASTER | Web-Oberfläche (`/`) und REST-API für Bildgenerierung |
+| `8080/tcp` | MASTER | Web-Oberfläche (`/`) und REST-API für Bild- und Videogenerierung |
 | `8081/tcp` | LLAMA | REST-API für Sprachmodell (OpenAI-kompatibel) |
 | `50052/tcp` | RPC | RPC-Protokoll zwischen Master und Workern |
 
-### 2.10 Betrieb
+### 2.11 Betrieb
 
 ```bash
 # Logs verfolgen
@@ -421,7 +516,7 @@ docker rm -f sd-rpc
 
 **Update:** Neues Image bauen/verteilen, dann **alle** Container neu erstellen. Niemals nur einzelne Knoten aktualisieren, da das RPC-Protokoll an die Build-Version gebunden ist.
 
-### 2.11 GPU-Beschleunigung mit Vulkan
+### 2.12 GPU-Beschleunigung mit Vulkan
 
 Das Image wird standardmäßig mit Vulkan-Backend gebaut. Eine GPU wird nur genutzt, wenn der Host sie in den Container sichtbar macht; sonst rechnet die Software auf der CPU weiter (Fallback).
 
@@ -444,7 +539,7 @@ Vulkan0 AMD Radeon RX 7600 (RADV NAVI33)
 CPU     AMD Ryzen 9 5900X 12-Core Processor
 ```
 
-Die Verwendung ist in Abschnitt 2.6 (Bild) und 2.7 (Sprache) beschrieben.
+Die Verwendung ist in Abschnitt 2.6 (Bild), 2.7 (Video) und 2.8 (Sprache) beschrieben.
 
 Wichtige Punkte:
 
