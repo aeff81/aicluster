@@ -119,7 +119,7 @@ gunzip -c sd-cluster.tar.gz | docker load
 
 > **Für AMD/Intel-GPUs:** Das Image muss einmalig mit `--build-arg INSTALL_MESA_VULKAN=true` gebaut werden (siehe oben). Das gilt dann für alle Hosts, die dieses Image verwenden.
 
-> **Hinweis:** Der Build lädt die Quellen von GitHub sowie die Frontend-Abhängigkeiten über `pnpm` und kompiliert `stable-diffusion.cpp` sowie `llama.cpp` inklusive Vulkan-Shadern. `llama.cpp` wird zweimal gebaut (RPC-Worker und LLM-Server, siehe 3.1). Er dauert je nach CPU etwa 20–35 Minuten und benötigt temporär mehrere GB Plattenplatz.
+> **Hinweis:** Der Build lädt die Quellen von GitHub, die Frontend-Abhängigkeiten über `pnpm` sowie die Web-UI für `llama-server` aus einem Hugging-Face-Bucket und kompiliert `stable-diffusion.cpp` und `llama.cpp` inklusive Vulkan-Shadern. Er dauert je nach CPU etwa 15–30 Minuten und benötigt temporär mehrere GB Plattenplatz.
 
 ### 2.3 Modelle ablegen
 
@@ -558,15 +558,14 @@ Wichtige Punkte:
 **Zweistufiger Build (Multi-Stage):**
 
 * **Stage `builder`** (`debian:trixie-slim`): Compiler und Build-Werkzeuge (`build-essential`, `cmake`, `git`, `libwebp-dev`), die Vulkan-Toolchain (`libvulkan-dev`, `glslc`, `glslang-tools`, `spirv-headers`) sowie `nodejs` und `npm`, um `pnpm@10.15.1` zu installieren.
-* **Stage final** (`debian:trixie-slim`): nur die fertigen Binaries und die Laufzeitbibliotheken `libwebp7` (WebP-Ausgabe), `libgomp1` (OpenMP) und `libvulkan1` (Vulkan-Loader). Optional kommen über `INSTALL_MESA_VULKAN=true` die Mesa-Treiber hinzu.
+* **Stage final** (`debian:trixie-slim`): nur die fertigen Binaries und die Laufzeitbibliotheken `libwebp7` (WebP-Ausgabe), `libgomp1` (OpenMP), `libvulkan1` (Vulkan-Loader) und `libssl3t64` (OpenSSL, von `llama-server` benötigt). Optional kommen über `INSTALL_MESA_VULKAN=true` die Mesa-Treiber hinzu.
 
-Drei Build-Argumente steuern den Umfang:
+Zwei Build-Argumente steuern den Umfang:
 
 | Argument | Standard | Zweck |
 |---|---|---|
 | `WITH_VULKAN` | `ON` | reicht `-DSD_VULKAN` bzw. `-DGGML_VULKAN` an CMake weiter; `OFF` ergibt ein reines CPU-Image |
 | `INSTALL_MESA_VULKAN` | `false` | installiert im Laufzeit-Image die Mesa-Treiber (AMD/Intel und Software-Vulkan) |
-| `LLAMA_SERVER_REF` | `9f0d80cf…` | llama.cpp-Commit für `llama-server`; leer = im Dockerfile hinterlegter Standard-Pin (siehe 3.1) |
 
 **Build von `stable-diffusion.cpp`:**
 
@@ -585,27 +584,17 @@ RUN mkdir build && cd build && \
 
 **Build von `llama.cpp` (RPC-Server + LLM-Server):**
 
-`llama.cpp` wird **zweimal** aus unterschiedlichen Quellständen gebaut:
-
-1. **`rpc-server`** – exakt auf dem llama.cpp-Commit, den `stable-diffusion.cpp` in seinem Submodul festschreibt. Das ist entscheidend, weil `sd-server` und `rpc-server` dasselbe GGML-RPC-Protokoll sprechen müssen:
+Die zu `stable-diffusion.cpp` passende `llama.cpp`-Version wird nicht geraten, sondern aus der Submodul-Datei gelesen:
 
 ```dockerfile
 RUN HASH=$(cat scripts/sync-llama.last) && \
-    git clone https://github.com/ggml-org/llama.cpp.git llama-rpc && \
-    cd llama-rpc && git checkout $HASH && ...
+    git clone https://github.com/ggml-org/llama.cpp.git && \
+    cd llama.cpp && git checkout $HASH && ...
 ```
 
-2. **`llama-server`** – aus dem über `LLAMA_SERVER_REF` gesetzten, neueren Commit:
+Das ist entscheidend: `sd-server`, `rpc-server` und `llama-server` müssen dasselbe GGML-RPC-Protokoll sprechen (aktuell Major 10). Deshalb kommen alle Binaries aus **einem** Build. Der von `stable-diffusion.cpp` vorgegebene Pin ist inzwischen aktuell genug und enthält auch die Architektur **LFM3** (in `llama.cpp` seit 27.10.2026, Commit `19cce691`).
 
-```dockerfile
-ARG LLAMA_SERVER_REF=9f0d80cf4aa781878742d1002fac114c18b76974
-RUN REF=${LLAMA_SERVER_REF:-$(cat /sdcpp/ggml/scripts/sync-llama.last)} && \
-    git clone https://github.com/ggml-org/llama.cpp.git /llama-server-src && ...
-```
-
-**Warum der separate Build?** `llama.cpp` hat keine Build-Option, mit der sich einzelne Modell-Architekturen zu- oder abschalten lassen – alle unterstützten Architekturen sind fest im Quellcode. Ein GGUF lädt daher nur, wenn der verwendete Commit die Architektur bereits kennt. Der von `stable-diffusion.cpp` vorgegebene Pin (`47f5a64`, 15.10.2026) ist älter als einige neuere Architekturen, z. B. **LFM3** (in `llama.cpp` seit 27.10.2026, Commit `19cce691`, PR #31252). Ohne den neueren Build scheitert das Laden mit `unknown model architecture: 'lfm3'`.
-
-Der Standardwert `9f0d80cf` (09.11.2026) ist der letzte `master`-Stand mit **RPC-Protokoll 8**. Damit funktioniert `llama-server --rpc …` weiterhin mit dem oben gepinnten `rpc-server` (Protokoll 8.0.0). Spätere `master`-Stände sprechen Protokoll 9 und können den Cluster-Worker nicht mehr nutzen. Beim Aktualisieren von `LLAMA_SERVER_REF` also immer `ggml/include/ggml-rpc.h` (`RPC_PROTO_MAJOR_VERSION`) prüfen. Ein leerer Wert baut wieder exakt den Pin.
+**Web-UI des `llama-server`:** `llama.cpp` lädt die UI der Tools beim Build aus einem Hugging-Face-Bucket und bettet sie in `llama-server` ein. Der mitgelieferte Validator verlangt veraltet eine `workbox[hash].js`; das aktuelle UI-Paket nutzt jedoch SvelteKits `service-worker.js`. Ohne Korrektur bricht der Build mit `UI: missing required asset(s): workbox[hash].js` ab. Der Dockerfile deaktiviert deshalb genau diese eine Prüfung per `sed` in `scripts/ui-assets.cmake` (gleiches Muster wie der `static_assert`-Hack bei `sd-server`). Die UI selbst ist vollständig; es muss nicht auf einen upstream-Fix gewartet werden. `-DLLAMA_BUILD_UI=OFF` verhindert zusätzlich einen lokalen npm-Build der UI. Der Build benötigt dadurch Netzwerkzugriff auf den Hugging-Face-Bucket.
 
 Wichtige CMake-Flags:
 
@@ -615,23 +604,21 @@ Wichtige CMake-Flags:
 | `-DGGML_VULKAN=${WITH_VULKAN}` | Vulkan-Backend für `llama-server` und `rpc-server` |
 | `-DBUILD_SHARED_LIBS=OFF` | statische Libraries; `ggml` wird fest einkompiliert, es gibt keine `libggml*.so` im Laufzeit-Image (der frühere Schalter `GGML_BUILD_SHARED_LIBS` existiert in `llama.cpp`/`ggml` **nicht** und wurde ignoriert) |
 | `-DLLAMA_CURL=OFF` | entfernt die unnötige libcurl-Abhängigkeit |
+| `-DLLAMA_BUILD_UI=OFF` | kein lokaler npm-Build der Tool-Web-UI; die vorgefertigten Assets kommen aus dem Hugging-Face-Bucket |
 | `-DCMAKE_C_FLAGS=-DGGML_MAX_NAME=160` / `-DCMAKE_CXX_FLAGS=...` | **Pflicht:** `stable-diffusion.cpp` erwartet `GGML_MAX_NAME=160`; der Standardwert `64` würde Datenübertragungen zwischen Client und Server scheitern lassen |
 
-**Binary-Ermittlung:** Die Ziel- und Dateinamen unterscheiden sich je nach `llama.cpp`-Version (das RPC-Programm heißt dort z. B. `ggml-rpc-server`, die Dokumentation spricht von `rpc-server`). Deshalb wird nach jedem Build das Binary gesucht, geprüft und an einen festen Pfad kopiert:
+**Binary-Ermittlung:** Die Ziel- und Dateinamen unterscheiden sich je nach `llama.cpp`-Version (das RPC-Programm heißt dort z. B. `ggml-rpc-server`, die Dokumentation spricht von `rpc-server`). Deshalb werden die Binaries nach dem Build gesucht, geprüft und an feste Pfade kopiert:
 
 ```dockerfile
-# im rpc-Build:
 RPC_BIN=$(find . -type f \( -name "ggml-rpc-server" -o -name "rpc-server" \) -executable | head -n1) && \
-test -n "$RPC_BIN" && cp "$RPC_BIN" /rpc-server-binary
-
-# im llama-server-Build:
 LLAMA_BIN=$(find . -type f -name "llama-server" -executable | head -n1) && \
-test -n "$LLAMA_BIN" && cp "$LLAMA_BIN" /llama-server-binary
+test -n "$RPC_BIN" && test -n "$LLAMA_BIN" && \
+cp "$RPC_BIN" /rpc-server-binary && cp "$LLAMA_BIN" /llama-server-binary
 ```
 
 Eine abschließende Prüfung stellt sicher, dass alle drei Binaries existieren **und** dass `rpc-server` und `llama-server` keine `libggml*.so` erwarten (`ldd ... | grep libggml`). Das vermeidet sowohl schwer lesbare `COPY`-Fehler als auch den Laufzeitfehler `error while loading shared libraries: libggml.so.0`.
 
-**Laufzeit-Image:** Die Binaries landen unter `/app`, das Modellverzeichnis wird als `VOLUME /models` deklariert, `EXPOSE` dokumentiert die Ports 8080/8081/50052, `ENTRYPOINT` ist das Rollen-Skript. `libvulkan1` ist immer installiert, damit die Vulkan-fähigen Binaries überhaupt starten; die eigentlichen GPU-Treiber (ICD-Dateien) kommen vom Host bzw. aus `mesa-vulkan-drivers`. `ENV NVIDIA_DRIVER_CAPABILITIES=all` sorgt dafür, dass das NVIDIA-Toolkit auch die Grafik-/Vulkan-Bibliotheken einhängt.
+**Laufzeit-Image:** Die Binaries landen unter `/app`, das Modellverzeichnis wird als `VOLUME /models` deklariert, `EXPOSE` dokumentiert die Ports 8080/8081/50052, `ENTRYPOINT` ist das Rollen-Skript. `libvulkan1` ist immer installiert, damit die Vulkan-fähigen Binaries überhaupt starten; `libssl3t64` wird vom aktuellen `llama-server` benötigt. Die eigentlichen GPU-Treiber (ICD-Dateien) kommen vom Host bzw. aus `mesa-vulkan-drivers`. `ENV NVIDIA_DRIVER_CAPABILITIES=all` sorgt dafür, dass das NVIDIA-Toolkit auch die Grafik-/Vulkan-Bibliotheken einhängt.
 
 ### 3.2 `entrypoint.sh`
 
@@ -674,8 +661,8 @@ Details:
 | **CPU-Fallback** | Das Image funktioniert ohne GPU vollständig. Vulkan wird nur genutzt, wenn der Host ein Gerät sichtbar macht; andernfalls rechnet die Software auf der CPU. |
 | **Vulkan standardmäßig an** | `WITH_VULKAN=ON` ist der Standard. Der Builder installiert dafür `libvulkan-dev`, `glslc`, `glslang-tools` und `spirv-headers`; das Laufzeit-Image enthält nur den Loader `libvulkan1`. `--build-arg WITH_VULKAN=OFF` erzeugt ein reines CPU-Image. |
 | **Mesa-Treiber optional** | `INSTALL_MESA_VULKAN=false` ist Standard, weil `mesa-vulkan-drivers` über `libllvm19` rund 125 MB plus weitere Treiberbibliotheken nachzieht (zusammen etwa 250 MB). AMD/Intel-Hosts bauen mit `true`; NVIDIA nutzt das `nvidia-container-toolkit`. Software-Vulkan (lavapipe) wird bewusst nicht voreingestellt, weil er als „GPU" mit viel Speicher erkannt wird und die automatische Platzierung verfälschen kann. |
-| **Web-UI eingebettet** | Der Builder installiert `nodejs`/`npm` und `pnpm@10.15.1`. CMake baut das Frontend und bettet `gen_index_html.h` fest in `sd-server` ein (`HAVE_INDEX_HTML`). Zur Laufzeit sind weder Node.js noch ein separater Webserver nötig. Fehlt `pnpm` (z. B. bei deaktiviertem Frontend-Build), wird die UI ohne Fehler weggelassen. |
-| **Protokoll-Pinning** | `rpc-server` wird exakt auf den von `stable-diffusion.cpp` vorgegebenen llama.cpp-Commit gebaut; `llama-server` aus einem neueren Commit (`LLAMA_SERVER_REF`), der dieselbe RPC-Hauptversion hat. Alle Cluster-Knoten müssen dasselbe Image verwenden. |
+| **Web-UI eingebettet** | Der Builder installiert `nodejs`/`npm` und `pnpm@10.15.1`. CMake baut das Frontend und bettet `gen_index_html.h` fest in `sd-server` ein (`HAVE_INDEX_HTML`). Die UI des `llama-server` kommt als vorgefertigtes Paket aus dem Hugging-Face-Bucket; die veraltete `workbox`-Prüfung wird dabei im Build deaktiviert. Zur Laufzeit sind weder Node.js noch ein separater Webserver nötig. Fehlt `pnpm`, wird die `sd-server`-UI ohne Fehler weggelassen. |
+| **Protokoll-Pinning** | `rpc-server` und `llama-server` werden aus demselben llama.cpp-Commit gebaut, den `stable-diffusion.cpp` vorgibt. Alle Cluster-Knoten müssen dasselbe Image verwenden. |
 | **Statische GGML-Binaries** | `llama.cpp`/`ggml` werden mit `-DBUILD_SHARED_LIBS=OFF` gebaut. `rpc-server` und `llama-server` enthalten `ggml` damit fest und benötigen keine `libggml*.so` im Laufzeit-Image. Der Build prüft das per `ldd`; so kann der Fehler `libggml.so.0: cannot open shared object file` nicht unbemerkt zurückkehren. |
 | **Modelle nur auf dem Master** | Laut `stable-diffusion.cpp`-Dokumentation bleiben die Modelldateien beim Client; der RPC-Server erhält Tensordaten und Rechengraphen. Das Volume auf den Workern ist daher nur einheitlicher Komfort. |
 | **Keine RPC-Sicherheit** | Der `rpc-server` bietet weder Authentifizierung noch Verschlüsselung. Nur in vertrauenswürdigen Netzen betreiben; Port 50052 nicht nach außen freigeben. |
@@ -684,6 +671,6 @@ Details:
 
 | Datei | Zweck |
 |---|---|
-| `Dockerfile` | zweistufiger Build aller drei Programme inklusive Vulkan-Backend und eingebetteter Web-UI, Laufzeit-Image |
+| `Dockerfile` | zweistufiger Build aller drei Programme inklusive Vulkan-Backend und eingebetteter Web-UIs, Laufzeit-Image |
 | `entrypoint.sh` | Rollenwahl über `SD_ROLE`, Start des passenden Servers |
 | `README.md` | diese Dokumentation |
