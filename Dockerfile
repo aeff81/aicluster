@@ -54,19 +54,24 @@ WORKDIR /sdcpp/ggml
 # gelinkte Binaries, die keine libggml*.so im Laufzeit-Image benoetigen.
 #
 # Die Web-UI der llama.cpp-Tools wird aus dem Hugging-Face-Bucket geladen.
-# Deren Validator verlangt veraltet eine "workbox[hash].js". Das aktuelle
-# UI-Paket nutzt stattdessen SvelteKits "service-worker.js", wodurch der Build
-# mit "UI: missing required asset(s): workbox[hash].js" abbricht. Die veraltete
-# Pruefung wird hier deaktiviert (gleiches Muster wie der static_assert-Hack
-# bei sd-server oben). Ohne den Patch keine eingebettete llama-UI.
+# Dessen Validator ui_validate_assets() ist mehrfach veraltet: Er verlangt
+# "bundle[hash].js/css" und "workbox[hash].js", das aktuelle UI-Paket liefert
+# aber SvelteKit-Dateien (app.*.css, entry/app.*.js, chunks/*.js,
+# service-worker.js). Statt einzelne Namen zu patchen, wird die gesamte
+# Pruefung per fruehem return() deaktiviert - so bleiben wir auch bei weiteren
+# Layout-Aenderungen stabil. Die Integritaet ist weiterhin abgesichert durch
+# die SHA256-Pruefung des Archivs und den index.html-Check in hf_download().
+# Gleiches Muster wie der static_assert-Hack bei sd-server oben.
+# HF_UI_VERSION=latest ueberspringt die geloeschte b12352-Revision, die sonst
+# zuerst erfolglos angefragt wird.
 # -DLLAMA_BUILD_UI=OFF verhindert zusaetzlich einen lokalen npm-Build der UI.
 RUN HASH=$(cat scripts/sync-llama.last) && \
     git clone https://github.com/ggml-org/llama.cpp.git && \
     cd llama.cpp && git checkout $HASH && \
-    sed -i 's/if(NOT found_workbox_js)/if(FALSE)/' scripts/ui-assets.cmake && \
+    sed -i '/^function(ui_validate_assets /a\    return()' scripts/ui-assets.cmake && \
     mkdir build && cd build && \
-    cmake .. -DGGML_RPC=ON -DGGML_VULKAN=${WITH_VULKAN} -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF \
-             -DLLAMA_BUILD_UI=OFF \
+    HF_UI_VERSION=latest cmake .. -DGGML_RPC=ON -DGGML_VULKAN=${WITH_VULKAN} \
+             -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_UI=OFF \
              -DCMAKE_C_FLAGS=-DGGML_MAX_NAME=160 -DCMAKE_CXX_FLAGS=-DGGML_MAX_NAME=160 && \
     cmake --build . --config Release -j $(nproc) && \
     RPC_BIN=$(find . -type f \( -name "ggml-rpc-server" -o -name "rpc-server" \) -executable | head -n1) && \
