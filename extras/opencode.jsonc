@@ -1,0 +1,71 @@
+// OpenCode-Projektkonfiguration: bindet den llama-server des Clusters
+// (docker-compose.yml, Service "llama-server", Port 8081) als Provider ein.
+//
+// Der Verbindungsteil (Endpunkt/Protokoll) ist modellunabhängig: llama-server
+// stellt unabhängig vom geladenen GGUF immer dieselbe OpenAI-kompatible API
+// bereit. Modellabhängig sind nur die Werte unter "limit" und "capabilities"
+// sowie Anzeigename und "modelID" – siehe Kommentare dort.
+//
+// Voraussetzungen auf Serverseite (SD_ARGS im Service "llama-server"):
+//  - "--jinja" ergänzen, sonst unterstützt der Server keine Tool-Aufrufe
+//    (ohne Tools ist OpenCode als Agent praktisch unbrauchbar).
+//  - "--n-predict 128" entfernen oder deutlich erhöhen: 128 Ausgabe-Tokens
+//    kappen jede Agent-Antwort mitten im Satz.
+//  - "--ctx-size" setzen (llama-server-Default ist 4096): Systemprompt und
+//    Tool-Definitionen von OpenCode brauchen allein schon deutlich mehr als
+//    10k Tokens. Empfehlung: so viel, wie Modell und VRAM erlauben, z. B.
+//    --ctx-size 32768. Der Wert muss zu "limit.context" unten passen.
+//  - Optional "--alias llama_model", damit GET /v1/models einen stabilen,
+//    kurzen Namen meldet (dann modelID unten entsprechend anpassen).
+//  - Optional "--api-key SCHLÜSSEL": nur dann unter settings zusätzlich
+//    "apiKey": "{env:SD_LLAMA_API_KEY}" eintragen (nie im Klartext hier).
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Auskommentiert lassen, solange das Cluster-LLM nicht der Standard für
+  // jede neue Session in diesem Projektverzeichnis sein soll:
+  // "model": "cluster-llama/llama",
+
+  "providers": {
+    "cluster-llama": {
+      "name": "Cluster llama-server",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        // Host und Port des llama-server (compose-Mapping "8081:8081").
+        // "localhost" gilt, wenn OpenCode auf demselben Host läuft wie der
+        // Cluster; andernfalls hier die Cluster-Adresse eintragen.
+        "baseURL": "http://localhost:8081/v1"
+      },
+      // llama-server erwartet "max_tokens" (nicht "max_completion_tokens").
+      "compatibility": {
+        "maxTokensField": "max_tokens"
+      },
+      "models": {
+        "llama": {
+          // Name, wie ihn GET /v1/models meldet (Modellpfad oder --alias).
+          // llama-server bedient ohnehin immer das aktuell geladene Modell;
+          // der Wert ist also eher Kosmetik. Prüfen mit:
+          //   curl -s http://localhost:8081/v1/models
+          "modelID": "llama_model.gguf",
+          "name": "Cluster-LLM (llama-server)",
+          // tools: true nur setzen, wenn das Modell Tool-Aufrufe im
+          // Chat-Template unterstützt (z. B. Qwen, Llama 3.1+) und der
+          // Server mit --jinja läuft. "image" nur bei multimodalen
+          // Modellen (z. B. llava) unter input ergänzen.
+          "capabilities": {
+            "tools": true,
+            "input": ["text"],
+            "output": ["text"]
+          },
+          // An das konkrete Modell und --ctx-size anpassen:
+          // context = Kontextfenster des Servers (--ctx-size),
+          // output  = realistische Obergrenze pro Antwort.
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}
